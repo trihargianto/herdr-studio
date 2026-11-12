@@ -1,0 +1,5 @@
+__pycache__/
+.published.json
+*.d.ts
+jsconfig.json
+.DS_Store
