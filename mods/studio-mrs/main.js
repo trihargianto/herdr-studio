@@ -19,9 +19,25 @@ function ago(ms) {
   return h < 24 ? `${h}h` : `${Math.floor(h / 24)}d`;
 }
 
+// Errors carry a `kind` so the pane can say what to do: "missing" (not installed), "auth" (not
+// signed in) or "other".
 async function glab(args) {
-  const r = await exec("glab", args, { cwd: home(), timeout: 30000 });
-  if (r.code !== 0) throw new Error((r.stderr || r.stdout || "glab failed").trim().split("\n")[0]);
+  let r;
+  try {
+    r = await exec("glab", args, { cwd: home(), timeout: 30000 });
+  } catch (e) {
+    const fail = new Error("glab isn't installed.");
+    fail.kind = "missing";
+    throw fail;
+  }
+  if (r.code !== 0) {
+    const text = (r.stderr || r.stdout || "glab failed").trim().split("\n")[0];
+    const fail = new Error(text);
+    fail.kind = r.code === 127 || /command not found|not found/i.test(text) ? "missing"
+      : /401|unauthori[sz]ed|not logged in|log ?in|auth|token/i.test(text) ? "auth" : "other";
+    if (fail.kind === "missing") fail.message = "glab isn't installed.";
+    throw fail;
+  }
   return r.stdout;
 }
 
@@ -129,6 +145,7 @@ export default class Mrs extends View {
         this.at = Date.now();
       } catch (e) {
         this.error = String(e.message ?? e);
+        this.errorKind = e.kind ?? "other";
       }
       this.loading = false;
       cx.notify();
@@ -301,7 +318,10 @@ export default class Mrs extends View {
       .child(v_flex().id("mrs-scroll").flex_1().min_h(0).px(10).pb(10).gap(6).overflow_y_scrollbar()
         .when(Boolean(this.error), (el) => el.child(v_flex().px(4).py(6).gap(4)
           .child(div().text_size(12).text_color(t.blocked).child(this.error))
-          .child(div().text_size(11.5).text_color(t.dim).child("Check `glab auth status`, then refresh."))))
+          .child(div().text_size(11.5).text_color(t.dim).whitespace_normal().child(
+            this.errorKind === "missing" ? "Install the GitLab CLI (gitlab.com/gitlab-org/cli), run `glab auth login`, then refresh."
+              : this.errorKind === "auth" ? "Run `glab auth login`, then refresh."
+                : "Check `glab auth status`, then refresh."))))
         .when(!loaded && !this.error, (el) => el.child(div().px(4).py(8).text_color(t.dim).child("Loading…")))
         .when(loaded && !mine.length && !reviews.length && !this.error && !narrowed, (el) => el.child(v_flex().px(4).py(8).gap(4)
           .child(div().text_color(t.muted).child("No open merge requests"))

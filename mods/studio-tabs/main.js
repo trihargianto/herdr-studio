@@ -136,7 +136,17 @@ export default class Tabs extends View {
           cx.notify();
         }
         try { localStorage.setItem("review", JSON.stringify({ n, at: Date.now() })); } catch {}
-      } catch {}
+        this.failures = 0;
+      } catch {
+        // glab missing, signed out or offline. One miss may be a blip; two in a row means the saved
+        // number can no longer be trusted, so the badge goes away rather than show a stale count.
+        this.failures = (this.failures ?? 0) + 1;
+        if (this.failures >= 2 && this.review !== 0) {
+          this.review = 0;
+          try { localStorage.removeItem("review"); } catch {}
+          cx.notify();
+        }
+      }
       this.counting = false;
     });
   }
