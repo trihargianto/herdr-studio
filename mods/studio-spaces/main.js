@@ -511,10 +511,23 @@ export default class Spaces extends View {
     if (changed) setShared("space.colors", kept);
     this.measure = 0;
     const rows = this.grouped(t, collapsed);
-    // Fit the panel to its rows (the Agents list takes the rest), once per change.
-    const want = Math.round(Math.min(380, Math.max(110, 31 + 14 + this.measure)));
+    // Fit the panel to its rows (the Agents list takes the rest), once per change, until the person
+    // drags the edge themselves: then their height wins, is remembered, and has no upper limit.
+    const now = find(layout(), "spaces")?.size?.px;
+    if (this.mine === undefined) {
+      try { this.mine = Number(localStorage.getItem("spaces.height")) || null; } catch { this.mine = null; }
+    }
+    if (this.fit != null && now != null) {
+      if (Math.abs(now - this.fit) <= 1) this.settled = true;
+      else if (this.settled) {
+        this.fit = this.mine = Math.round(now); // a drag: this is now the height to keep
+        try { localStorage.setItem("spaces.height", String(this.mine)); } catch {}
+      }
+    }
+    const want = this.mine ?? Math.round(Math.min(380, Math.max(110, 31 + 14 + this.measure)));
     if (!collapsed && Math.abs(want - (this.fit ?? 0)) > 1) {
       this.fit = want;
+      this.settled = false;
       run("layout.resize", { id: "spaces", px: want });
     }
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)

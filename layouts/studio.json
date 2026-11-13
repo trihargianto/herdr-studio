@@ -51,8 +51,7 @@
               "min": 90,
               "content": {
                 "mod": "studio-spaces"
-              },
-              "max": 380
+              }
             },
             {
               "id": "agents",

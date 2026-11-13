@@ -23,6 +23,14 @@ function ago(ms) {
   return h < 24 ? `${h}h` : `${Math.floor(h / 24)}d`;
 }
 
+function resetIn(ms) {
+  const m = Math.max(1, Math.round(ms / 60000));
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
 // Sky blue and orange stay apart for every common kind of colour blindness (the Okabe-Ito pair).
 const CPU_COLOR = "#56B4E9", MEM_COLOR = "#E69F00";
 
@@ -85,6 +93,20 @@ function parse(text) {
   return null;
 }
 
+// "in 3h 21m", "in 4d 2h" or "at 20:05" to a moment in time, so a saved reading can keep counting down.
+function resetMoment(text, now) {
+  if (!text) return null;
+  const at = text.match(/^at (\d{1,2}):(\d{2})$/);
+  if (at) {
+    const d = new Date(now);
+    d.setHours(Number(at[1]), Number(at[2]), 0, 0);
+    return d.getTime() <= now ? d.getTime() + 86400000 : d.getTime();
+  }
+  const get = (u) => Number(text.match(new RegExp(`(\\d+)\\s*${u}`))?.[1] ?? 0);
+  const ms = ((get("d") * 24 + get("h")) * 60 + get("m")) * 60000;
+  return ms ? now + ms : null;
+}
+
 // A pane in the side panel does work only while it is the one shown: a hidden pane's timers still run,
 // so each tick asks first. (The tab bar keeps its own counters, which are always needed.)
 function findNode(node, id) {
@@ -104,12 +126,16 @@ function shown(id) {
 export default class Usage extends View {
   init(_props, cx) {
     this.data = load("limits", null); // last good reading, shown at once on open
+    // Each agent's account limits, kept after its sessions close: { five|week: { pct, resetAt, readAt } }.
+    this.acct = load("account-limits", {});
     this.loading = false;
     this.last = 0;
     this.mon = null; // { at, spaces: [...], panes: [...] }
     this.monBusy = false;
     this.pids = new Map(); // terminal address -> its shell's pid
     this.folded = load("monitor-folded", {}); // section title -> true when folded
+    this.heights = load("monitor-heights", {}); // section title -> the height the person dragged it to
+    this.drag = null; // { title, y, h } while a list's bottom edge is held
     this.sys = null; // { cores, ramKb }, read once
     // Reads once a minute, but only while this pane is the one shown (and at once when it opens).
     cx.timer.every(3000, (cx) => {
@@ -205,7 +231,7 @@ export default class Usage extends View {
     this.loading = true;
     this.last = Date.now();
     cx.notify();
-    const list = agents().map((a) => ({ address: a.address, title: clean(a.title) || a.program?.name || "Agent", icon: a.program, status: a.status, seq: a.seq }));
+    const list = agents().map((a) => ({ address: a.address, program: a.program?.key ?? a.program?.name, title: clean(a.title) || a.program?.name || "Agent", icon: a.program, status: a.status, seq: a.seq }));
     cx.spawn(async (cx) => {
       const seen = [];
       const queue = [...list];
@@ -214,22 +240,32 @@ export default class Usage extends View {
           try {
             const r = await hc(["read", a.address]);
             const got = r.code === 0 ? parse(r.stdout) : null;
-            if (got) seen.push({ ...a, ...got });
+            // Antigravity's custom statusline prints Claude's shape (Context and Weekly bars, no 5-hour
+            // limit), so the agent's own name tells them apart.
+            const agy = /antigravity|^agy$/i.test(`${a.icon?.key ?? ""} ${a.program ?? ""}`);
+            if (got) seen.push({ ...a, ...got, kind: agy ? "antigravity" : got.kind, five: agy ? null : got.five, fiveReset: agy ? null : got.fiveReset });
           } catch {}
         }
       };
       await Promise.all(Array.from({ length: 4 }, worker));
       // The account's limits are the same in every session of one agent: take the freshest reading.
       const freshest = (kind, key) => seen.filter((s) => s.kind === kind && s[key] != null).sort((a, b) => b.seq - a.seq)[0] ?? null;
+      // A window with no fresh reading keeps its last one. Its reset moment is saved, not "in 3h".
+      const now = Date.now();
       const account = (kind) => {
-        const five = freshest(kind, "five"), week = freshest(kind, "week");
-        return { five: five?.five ?? null, fiveReset: five?.fiveReset ?? null, week: week?.week ?? null, weekReset: week?.weekReset ?? null };
+        const prev = this.acct[kind] ?? {};
+        const out = { ...prev };
+        for (const [key, resetKey] of [["five", "fiveReset"], ["week", "weekReset"]]) {
+          const r = freshest(kind, key);
+          if (r) out[key] = { pct: r[key], resetAt: resetMoment(r[resetKey], now) ?? (prev[key]?.resetAt > now ? prev[key].resetAt : null), readAt: now };
+        }
+        return out;
       };
+      this.acct = { claude: account("claude"), codex: account("codex"), antigravity: account("antigravity") };
+      save("account-limits", this.acct);
       if (seen.length || !this.data) {
         this.data = {
           at: Date.now(),
-          claude: account("claude"),
-          codex: account("codex"),
           contexts: seen.map((s) => ({ address: s.address, title: s.title, kind: s.kind, context: s.context, icon: s.icon, status: s.status })),
         };
         save("limits", this.data);
@@ -252,11 +288,19 @@ export default class Usage extends View {
       .child(this.loading ? svg(`${ICONS}/spinner.svg`).size(13).text_color(t.muted).spin(900) : svg(path).size(13));
   }
 
-  // One limit: what is used, how full that is, and when it resets.
-  meter(t, name, pct, reset) {
-    if (pct == null) {
+  // One limit: what is used, how full that is, and when it resets. A reading whose window has
+  // reset since is no longer true, so it says so instead of showing the old number.
+  meter(t, name, w, now) {
+    if (!w) {
       return v_flex().gap(6).child(h_flex().items_baseline().child(div().flex_1().text_size(12).text_color(t.muted).child(name)).child(div().text_size(12).text_color(t.dim).child("not shown")));
     }
+    const over = w.resetAt != null && w.resetAt <= now;
+    if (over) {
+      return v_flex().gap(6).child(h_flex().items_baseline().gap(8)
+        .child(div().flex_1().text_size(12).text_color(t.muted).child(name))
+        .child(div().text_size(12).text_color(t.dim).child("Reset since the last reading")));
+    }
+    const pct = w.pct;
     const color = this.tone(t, pct);
     return v_flex().gap(6)
       .child(h_flex().items_baseline().gap(8)
@@ -264,17 +308,21 @@ export default class Usage extends View {
         .child(div().text_size(18).font_semibold().text_color(pct >= 70 ? color : t.foreground).child(`${pct}%`))
         .child(div().text_size(11).text_color(t.dim).child("used")))
       .child(h_flex().h(5).rounded(3).overflow_hidden().bg(t.raised).child(div().h_full().w(`${Math.min(100, pct)}%`).bg(color)))
-      .when(Boolean(reset), (el) => el.child(div().text_size(11).text_color(t.dim).child(`Resets ${reset}`)));
+      .when(w.resetAt != null, (el) => el.child(div().text_size(11).text_color(t.dim).child(`Resets in ${resetIn(w.resetAt - now)}`)));
   }
 
-  account(t, name, accent, data) {
-    const none = data.five == null && data.week == null;
+  account(t, name, accent, data, now, weeklyOnly = false) {
+    const wins = weeklyOnly ? [data?.week] : [data?.five, data?.week];
+    const none = wins.every((w) => !w);
+    const newest = Math.max(0, ...wins.map((w) => w?.readAt ?? 0));
+    const old = newest > 0 && now - newest > 120000;
     return v_flex().flex_none().p(14).gap(14).rounded(10).border(1).border_color(t.border).bg(t.chrome)
       .child(h_flex().items_center().gap(8)
         .child(div().size(8).rounded(2).bg(accent))
-        .child(div().text_size(13).font_semibold().child(name)))
-      .when(none, (el) => el.child(div().text_size(12).text_color(t.dim).whitespace_normal().child(`No ${name} session is showing its limits right now.`)))
-      .when(!none, (el) => el.child(this.meter(t, "5 hours", data.five, data.fiveReset)).child(this.meter(t, "Weekly", data.week, data.weekReset)));
+        .child(div().flex_1().text_size(13).font_semibold().child(name))
+        .when(old, (el) => el.child(div().text_size(11).text_color(t.dim).child(`as of ${ago(now - newest)} ago`))))
+      .when(none, (el) => el.child(div().text_size(12).text_color(t.dim).whitespace_normal().child(`No ${name} session has shown its limits yet.`)))
+      .when(!none, (el) => el.when(!weeklyOnly, (m) => m.child(this.meter(t, "5 hours", data.five, now))).child(this.meter(t, "Weekly", data.week, now)));
   }
 
   // A section title that folds its list on click; the choice is remembered per title.
@@ -305,6 +353,16 @@ export default class Usage extends View {
         .child(div().h_full().rounded(2).w(`${Math.max(2, Math.round(frac * 100))}%`).bg(color)));
   }
 
+  // The bottom edge of a list: drag it to make the list taller or shorter, with no upper limit.
+  // The move and release are read on the whole scroll view (see render), so a fast drag cannot slip off.
+  resizeHandle(t, title, height) {
+    const held = this.drag?.title === title;
+    return h_flex().id(`mon-resize-${title}`).flex_none().h(12).items_center().justify_center().cursor_row_resize()
+      .tooltip("Drag to resize").accessibility_label(`Resize ${title} list`)
+      .on_mouse_down("left", (e, cx) => { this.drag = { title, y: e.position.y, h: height }; cx.notify(); })
+      .child(div().w(36).h(3).rounded(2).bg(held ? t.muted : t.border));
+  }
+
   // One list, busiest first. "Load" adds a row's share of all CPU in use to its share of all memory in
   // use, so a pane that is busy and one that is big both rise, with no switch to flip.
   usageList(t, title, items) {
@@ -314,10 +372,12 @@ export default class Usage extends View {
     const sorted = [...items].sort((a, b) => load(b) - load(a) || a.name.localeCompare(b.name));
     const topCpu = Math.max(1, ...items.map((r) => r.cpu)), topMem = Math.max(1, ...items.map((r) => r.mem));
     const folded = Boolean(this.folded[title]);
+    const n = sorted.length;
+    const height = this.heights[title] ?? (n > 2 ? CARD * 2 + GAP : n * CARD + Math.max(0, n - 1) * GAP);
     return v_flex().flex_none().gap(6)
       .child(this.foldHeader(t, title, items.length))
       .when(!folded, (el) => el.child(v_flex().id(`mon-list-${title}`).gap(GAP).min_h(0)
-        .when(sorted.length > 2, (l) => l.h(CARD * 2 + GAP).overflow_y_scrollbar())
+        .h(height).overflow_y_scrollbar()
         .children(sorted.map((r) => v_flex().id(`mon-${title}-${r.id}`).flex_none().h(CARD).gap(10).px(12).py(11).rounded(10).bg(t.raised)
         .child(h_flex().gap(8).items_center()
           .when(Boolean(r.icon?.icon), (el) => el.child(r.icon.tint ? svg(r.icon.icon).size(14).flex_none().text_color(t.foreground) : image(r.icon.icon).size(14).flex_none()))
@@ -325,7 +385,8 @@ export default class Usage extends View {
           .child(div().flex_none().max_w(110).truncate().text_size(11).text_color(t.dim).child(r.sub)))
         .child(h_flex().gap(14)
           .child(this.metric(t, "CPU", CPU_COLOR, cpu(r.cpu), r.cpu / topCpu))
-          .child(this.metric(t, "MEM", MEM_COLOR, mem(r.mem), r.mem / topMem)))))));
+          .child(this.metric(t, "MEM", MEM_COLOR, mem(r.mem), r.mem / topMem))))))
+        .child(this.resizeHandle(t, title, height)));
   }
 
   // The totals: the whole computer, with the share Herdr's panes take marked inside the bar.
@@ -377,10 +438,22 @@ export default class Usage extends View {
         .when(Boolean(d?.at), (el) => el.child(div().text_size(11).text_color(t.dim).child(ago(now - d.at))))
         .child(this.iconButton(t, "usage-refresh", "mods/studio-usage/refresh.svg", "Refresh", (cx) => { this.refresh(cx); this.monitor(cx); })))
       .child(v_flex().id("usage-scroll").flex_1().min_h(0).px(12).pb(14).gap(10).overflow_y_scrollbar()
+        .on_mouse_move((e, cx) => {
+          if (!this.drag) return;
+          this.heights = { ...this.heights, [this.drag.title]: Math.max(CARD, Math.round(this.drag.h + e.position.y - this.drag.y)) };
+          cx.notify();
+        })
+        .on_mouse_up("left", (_e, cx) => {
+          if (!this.drag) return;
+          this.drag = null;
+          save("monitor-heights", this.heights);
+          cx.notify();
+        })
         .child(this.monitorCard(t))
         .when(!d, (el) => el.child(div().px(4).py(8).text_color(t.dim).child("Reading the agents' status lines…")))
-        .when(Boolean(d), (el) => el.child(this.account(t, "Claude", t.ansi3, d.claude)))
-        .when(Boolean(d), (el) => el.child(this.account(t, "Codex", t.ansi4, d.codex)))
+        .child(this.account(t, "Claude", t.ansi3, this.acct.claude, now))
+        .child(this.account(t, "Codex", t.ansi4, this.acct.codex, now))
+        .child(this.account(t, "Antigravity", t.ansi5, this.acct.antigravity, now, true))
         .when(Boolean(d) && contexts.length > 0, (el) => el.child(v_flex().flex_none().gap(6)
           .child(this.foldHeader(t, "Context", contexts.length))
           .when(!this.folded.Context, (sec) => sec.child(v_flex().id("ctx-list").p(12).rounded(10).bg(t.raised).min_h(0)
