@@ -96,7 +96,9 @@ export default class Tasks extends View {
     });
     this.linkIn = InputState.new({ placeholder: "Paste a link, press Enter" });
     this.titleIn.on("submit", (_e, cx) => this.save(cx));
-    this.notesIn.on("submit", (_e, cx) => this.save(cx));
+    // Details are multi-line: Enter and Shift+Enter add a line (the editor also reports them as "submit",
+    // without `secondary`), and only Cmd/Ctrl+Enter saves the form.
+    this.notesIn.on("submit", (e, cx) => { if (e.secondary) this.save(cx); });
     this.linkIn.on("submit", (_e, cx) => this.addLink(cx));
     for (const [name, state] of [["title", this.titleIn], ["notes", this.notesIn], ["link", this.linkIn]]) {
       state.on("focus", (_e, cx) => { this.focus = name; cx.notify(); });
@@ -367,7 +369,7 @@ export default class Tasks extends View {
           }, null, 22)))))
       .when(Boolean(this.note), (el) => el.child(div().text_size(11.5).text_color(this.note.ok ? t.ansi2 : t.blocked).child(this.note.text)))
       .child(h_flex().gap(8).items_center()
-        .child(div().flex_1().text_size(11).text_color(t.dim).child("Enter in the title saves"))
+        .child(div().flex_1().text_size(11).text_color(t.dim).child("Enter in the title saves · ⌘Enter in details saves"))
         .child(this.button(t, "f-cancel", "Cancel", (cx) => { this.form = null; this.note = null; cx.notify(); }))
         .child(div().id("f-save").h(26).px(14).flex().items_center().flex_none().rounded(7).text_size(12).font_medium()
           .accessibility_label("Save task").bg(ready ? t.solid : t.raised).text_color(ready ? t.solid_foreground : t.dim)
