@@ -156,6 +156,13 @@
                       }
                     },
                     {
+                      "id": "talk",
+                      "type": "block",
+                      "content": {
+                        "mod": "studio-talk"
+                      }
+                    },
+                    {
                       "id": "panes",
                       "type": "block",
                       "content": {

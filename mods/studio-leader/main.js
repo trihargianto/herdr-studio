@@ -56,6 +56,7 @@ const TREE = [
     { key: "t", label: "Tasks", run: panel("tasks") },
     { key: "i", label: "Inbox", run: panel("inbox") },
     { key: "a", label: "Panes", run: panel("panes", "studio-panes") },
+    { key: "l", label: "Agent talk", run: panel("talk") },
     { key: "s", label: "Send", run: panel("send") },
     { key: "g", label: "Merge requests", run: panel("mrs") },
     { key: "o", label: "Ports", run: panel("ports") },
