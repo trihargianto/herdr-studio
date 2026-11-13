@@ -1,0 +1,9 @@
+{
+  "layout:studio": {
+    "cmd-p": "mod.open:studio-picker",
+    "ctrl-b": "mod.open:studio-leader"
+  },
+  "mod:studio-leader": {
+    "ctrl-b": "studio-leader.pass"
+  }
+}

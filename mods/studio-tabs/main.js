@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, ScrollHandle } from "gpui-base";
-import { spaces, panes, agents, run, openOverlay, theme, window, layout, settings, keys, focused, terminals, exec, readTextFile, appHome, home } from "herdr";
+import { spaces, panes, agents, run, openOverlay, theme, window, layout, settings, keys, focused, terminals, exec, readTextFile, appHome, home, nextCommand } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -12,21 +12,59 @@ function find(node, id) {
 }
 
 // The agents' own helpers listen on ports too: they are not your dev servers.
-const TOOLS = new Set(["claude", "codex", "plannotator", "hc", "herdr-core", "herdr-app"]);
+const TOOLS = new Set(["claude", "codex", "hc", "herdr-core", "herdr-app"]);
 const VERSION = /^\d+\.\d+\.\d+$/;
 
 export default class Tabs extends View {
+  // A new tab running Neovim, in the repository root of the focused pane (else its folder). The tab bar's
+  // Neovim button and the leader's Ctrl+B n both come here, so they always agree.
+  openNeovim(cx) {
+    const f = focused();
+    // The folder the pane reports as you move around. The terminal list's folder is only where
+    // the terminal started, so it is the last resort.
+    const pane = panes().find(p => p.terminal === f?.terminal);
+    const started = terminals().find(x => x.address === f?.terminal)?.cwd;
+    const here = pane?.cwd ?? f?.cwd ?? started;
+    const remote = (f?.terminal ?? "").includes("/");
+    cx.spawn(async (cx) => {
+      // The root of the repository the pane is in (a worktree's own root counts). If it isn't
+      // inside one, the pane's own folder: a space's recorded folder is only where it was created.
+      let folder = here;
+      if (here && !remote) {
+        let top = null;
+        try {
+          const r = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: here, timeout: 10000 });
+          if (r.code === 0) top = r.stdout.trim();
+        } catch {}
+        folder = top || here;
+      }
+      run("terminal.open", { argv: ["nvim"], place: "tab", name: "Neovim", ...(folder && !remote ? { folder } : {}) });
+    });
+  }
+
   init(_props, cx) {
     this.barWidth = null; // the tab bar's width, to drop the labels when it gets tight
     this.pressed = null;
     this.scroll = ScrollHandle.new();
-    this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}");
+    try { this.panelOrder = JSON.parse(localStorage.getItem("panel-order") ?? "[]"); } catch { this.panelOrder = []; }
+    if (!Array.isArray(this.panelOrder)) this.panelOrder = [];
+    this.panelPress = null;
+    this.panelDrop = null;
+    this.panelDragged = false;
+    this.skipPanelClick = false;
     // Counters for the Tasks and MRs buttons. The MR count is kept between runs, so it shows at once.
     this.todo = 0;
     this.review = (() => { try { return JSON.parse(localStorage.getItem("review"))?.n ?? 0; } catch { return 0; } })();
     this.me = null;
     this.counting = false;
     this.servers = 0;
+    // Commands from keys and other mods ("studio-tabs.neovim").
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        if (c === "neovim") this.openNeovim(cx);
+      }
+    });
     this.readTodo(cx);
     this.countServers(cx);
     cx.timer.every(15000, (cx) => this.countServers(cx));
@@ -79,7 +117,7 @@ export default class Tabs extends View {
             const command = commands.get(x.pid) ?? x.cmd;
             const word = command.split(/\s+/)[0].split("/").pop();
             const tool = TOOLS.has(word) || TOOLS.has(x.cmd) || VERSION.test(x.cmd);
-            return dir.startsWith(`${base}/`) && !dir.startsWith(`${base}/Library`) && !tool;
+            return word === "plannotator" || x.cmd === "plannotator" || (dir.startsWith(`${base}/`) && !dir.startsWith(`${base}/Library`) && !tool);
           }).length;
         }
       } catch {}
@@ -159,32 +197,19 @@ export default class Tabs extends View {
     return b ? b.keys.split("-").map((p) => mod[p.toLowerCase()] ?? p.toUpperCase()).join("") : null;
   }
 
-  // The side panel is remembered per space: switching shows that space's choice
-  // (closed if it never had one), and opening or closing it records it.
-  syncPanel(space, panel, body, enabled) {
-    if (!space || !panel) return;
-    const now = panel.hidden ? null : body?.active ?? null;
-    if (space.id !== this.space) {
-      const first = this.space === undefined;
-      this.space = space.id; this.pending = null;
-      if (!(first && !(space.id in this.panels))) {
-        const stored = this.panels[space.id] ?? null, want = enabled.includes(stored) ? stored : null;
-        if (want !== now) {
-          this.pending = { want, until: Date.now() + 1000 };
-          if (want) { run("layout.select", { stack: "panel-body", child: want }); run("layout.show", { id: "panel" }); }
-          else run("layout.hide", { id: "panel" });
-          return;
-        }
-      }
-    }
-    // Until the restore lands (or something else won), the old state isn't a choice.
-    if (this.pending) {
-      if (this.pending.want !== now && Date.now() < this.pending.until) return;
-      this.pending = null;
-    }
-    if (this.panels[space.id] === now) return;
-    this.panels[space.id] = now;
-    localStorage.setItem("panels", JSON.stringify(this.panels));
+  clearPanelDrag(cx) {
+    const changed = this.panelDragged;
+    this.panelPress = null;
+    this.panelDrop = null;
+    this.panelDragged = false;
+    if (changed) cx.notify();
+  }
+
+  movePanel(from, target, after, ids) {
+    const order = ids.filter(id => id !== from);
+    order.splice(order.indexOf(target) + (after ? 1 : 0), 0, from);
+    this.panelOrder = order;
+    localStorage.setItem("panel-order", JSON.stringify(order));
   }
 
   render() {
@@ -231,22 +256,50 @@ export default class Tabs extends View {
       ? Math.max(10, (root.traffic_lights[0] + 64) / settings().zoom - (sidebar?.hidden ? 0 : sidebar?.size?.px ?? 0))
       : 10;
     const panel = find(root, "panel"), body = find(root, "panel-body");
-    // The panes this bar offers. Files and Changes are not among them.
-    const enabled = ["inbox", "send", "mrs", "tasks", "ports", "usage", "review"];
     // What the Inbox holds: agents that need you, and ones that finished while you were away.
     const waiting = agents().filter(a => a.status === "blocked" || a.status === "done");
     const blocked = waiting.filter(a => a.status === "blocked").length;
     const finished = waiting.length - blocked;
     const inboxColor = blocked ? t.blocked : t.done;
-    this.syncPanel(space, panel, body, enabled);
     // label: text next to the icon; without it the button is icon-only and says what it is on hover.
     const panelButton = (id, label, icon, tip, badge) => {
       const on = panel && !panel.hidden && body?.active === id;
-      return h_flex().id(`panel-${id}`).h(26).px(label ? 8 : 7).gap(5).flex_none().items_center().rounded(6)
+      return h_flex().id(`panel-${id}`).relative().h(26).px(label ? 8 : 7).gap(5).flex_none().items_center().rounded(6)
         .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
-        .cursor_pointer().tooltip(tip ?? label).accessibility_label(tip ?? label)
-        .hover(s => s.bg(on ? t.selected : t.hover)).active(s => s.bg(t.selected)).on_mouse_down("left", stop)
+        .cursor_pointer().tooltip(`${tip ?? label} · drag to reorder`).accessibility_label(tip ?? label)
+        .hover(s => s.bg(on ? t.selected : t.hover)).active(s => s.bg(t.selected))
+        .when(this.panelDragged && this.panelPress?.id === id, el => el.opacity(0.5))
+        .when(this.panelDragged && this.panelDrop?.id === id && this.panelPress?.id !== id, el => el.child(
+          div().absolute().top(3).bottom(3).w(2).bg(t.accent)
+            .when(this.panelDrop.after, line => line.right(0))
+            .when(!this.panelDrop.after, line => line.left(0))))
+        .on_mouse_down("left", (e, cx) => {
+          cx.stop_propagation();
+          this.panelPress = { id, x: e.position.x, y: e.position.y };
+          this.panelDrop = null;
+          this.panelDragged = false;
+          this.skipPanelClick = false;
+        })
+        .on_mouse_move((e, cx) => {
+          if (!this.panelPress) return;
+          if (!this.panelDragged && Math.hypot(e.position.x - this.panelPress.x, e.position.y - this.panelPress.y) < 5) return;
+          const after = e.local_position.x > e.bounds.width / 2;
+          if (!this.panelDragged || this.panelDrop?.id !== id || this.panelDrop?.after !== after) {
+            this.panelDragged = true;
+            this.panelDrop = { id, after };
+            cx.notify();
+          }
+        })
+        .on_mouse_up("left", (_e, cx) => {
+          cx.stop_propagation();
+          this.skipPanelClick = this.panelDragged;
+          if (this.panelDragged && this.panelPress?.id !== id && this.panelDrop?.id === id) {
+            this.movePanel(this.panelPress.id, id, this.panelDrop.after, orderedPanels.map(p => p[0]));
+          }
+          this.clearPanelDrag(cx);
+        })
         .on_click(() => {
+          if (this.skipPanelClick) return;
           if (on) run("layout.hide", { id: "panel" });
           else { run("layout.select", { stack: "panel-body", child: id }); run("layout.show", { id: "panel" }); }
         }).child(svg(icon).size(14))
@@ -256,6 +309,21 @@ export default class Tabs extends View {
     // Words next to the icons while there is room for them.
     const words = this.barWidth === null || this.barWidth >= 1100;
     const named = (text) => (words ? text : null);
+    const panels = [
+      ["projects", named("Projects"), "mods/studio-tabs/projects.svg", "Projects · jump to a project's space"],
+      ["automations", named("Automations"), "mods/studio-tabs/automations.svg", "Automations · scheduled cron jobs"],
+      ["panes", named("Panes"), "mods/studio-tabs/panes.svg", "Navigate all panes"],
+      ["review", named("Review"), "mods/studio-workspace-chrome/git-compare.svg", "Review changes in Hunk"],
+      ["usage", named("Monitoring"), "mods/studio-tabs/chart.svg", "Monitoring · limits, CPU and memory"],
+      ["ports", named("Ports"), "mods/studio-tabs/plug.svg", this.servers ? `Ports · ${this.servers} ${this.servers === 1 ? "server" : "servers"} running` : "Ports and servers", this.servers ? { n: this.servers, color: t.ansi2 } : null],
+      ["tasks", named("Tasks"), "mods/studio-tabs/list-todo.svg", this.todo ? `Tasks · ${this.todo} to do` : "Tasks", this.todo ? { n: this.todo, color: t.muted } : null],
+      ["inbox", named("Inbox"), "mods/studio-tabs/inbox.svg", waiting.length ? `Inbox · ${[blocked ? `${blocked} need you` : null, finished ? `${finished} done` : null].filter(Boolean).join(", ")}` : "Inbox", waiting.length ? { n: waiting.length, color: inboxColor } : null],
+      ["send", named("Send"), "mods/studio-tabs/send.svg", "Send a message to an agent"],
+      ["mrs", named("MRs"), "mods/studio-tabs/git-pull-request.svg", this.review ? `Merge requests · ${this.review} to review` : "Merge requests", this.review ? { n: this.review, color: t.working } : null],
+    ];
+    const saved = [...new Set(this.panelOrder)].filter(id => panels.some(p => p[0] === id));
+    const order = [...saved, ...panels.map(p => p[0]).filter(id => !saved.includes(id))];
+    const orderedPanels = order.map(id => panels.find(p => p[0] === id));
     return h_flex().id("tab-bar").size_full().min_w(0).px(10).pl(lightsPadding)
       .on_size_change((size, cx) => {
         if (this.barWidth !== size.width) {
@@ -263,7 +331,9 @@ export default class Tabs extends View {
           cx.notify();
         }
       }).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
-      .on_mouse_up("left", () => { this.pressed = null; })
+      .on_mouse_up("left", (_e, cx) => { this.pressed = null; this.clearPanelDrag(cx); })
+      .on_mouse_down_out((_e, cx) => this.clearPanelDrag(cx))
+      .on_hover((hovered, cx) => { if (!hovered) this.clearPanelDrag(cx); })
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().track_scroll(this.scroll)
         .on_size_change((_size, cx) => { if (active >= 0) { this.scroll.scroll_to_item(active); cx.notify(); } })
@@ -273,38 +343,10 @@ export default class Tabs extends View {
       .child(h_flex().id("nvim-new").h(26).px(words ? 8 : 7).gap(5).flex_none().items_center().rounded(6).text_size(12)
         .text_color(t.muted).cursor_pointer().tooltip("New tab with Neovim").accessibility_label("Open Neovim in a new tab")
         .hover(s => s.bg(t.hover).text_color(t.foreground)).active(s => s.bg(t.selected)).on_mouse_down("left", stop)
-        .on_click((_e, cx) => {
-          const f = focused();
-          // The folder the pane reports as you move around. The terminal list's folder is only where
-          // the terminal started, so it is the last resort.
-          const pane = panes().find(p => p.terminal === f?.terminal);
-          const started = terminals().find(x => x.address === f?.terminal)?.cwd;
-          const here = pane?.cwd ?? f?.cwd ?? started;
-          const remote = (f?.terminal ?? "").includes("/");
-          cx.spawn(async (cx) => {
-            // The root of the repository the pane is in (a worktree's own root counts). If it isn't
-            // inside one, the pane's own folder: a space's recorded folder is only where it was created.
-            let folder = here;
-            if (here && !remote) {
-              let top = null;
-              try {
-                const r = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: here, timeout: 10000 });
-                if (r.code === 0) top = r.stdout.trim();
-              } catch {}
-              folder = top || here;
-            }
-            run("terminal.open", { argv: ["nvim"], place: "tab", name: "Neovim", ...(folder && !remote ? { folder } : {}) });
-          });
-        })
+        .on_click((_e, cx) => this.openNeovim(cx))
         .child(svg("mods/studio-workspace-chrome/terminal.svg").size(14))
         .when(words, el => el.child("Neovim")))
-      .child(panelButton("review", named("Review"), "mods/studio-workspace-chrome/git-compare.svg", "Review changes in Hunk"))
-      .child(panelButton("usage", named("Usage"), "mods/studio-tabs/chart.svg", "Usage"))
-      .child(panelButton("ports", named("Ports"), "mods/studio-tabs/plug.svg", this.servers ? `Ports · ${this.servers} ${this.servers === 1 ? "server" : "servers"} running` : "Ports and servers", this.servers ? { n: this.servers, color: t.ansi2 } : null))
-      .child(panelButton("tasks", named("Tasks"), "mods/studio-tabs/list-todo.svg", this.todo ? `Tasks · ${this.todo} to do` : "Tasks", this.todo ? { n: this.todo, color: t.muted } : null))
-      .child(panelButton("inbox", named("Inbox"), "mods/studio-tabs/inbox.svg", waiting.length ? `Inbox · ${[blocked ? `${blocked} need you` : null, finished ? `${finished} done` : null].filter(Boolean).join(", ")}` : "Inbox", waiting.length ? { n: waiting.length, color: inboxColor } : null))
-      .child(panelButton("send", named("Send"), "mods/studio-tabs/send.svg", "Send a message to an agent"))
-      .child(panelButton("mrs", named("MRs"), "mods/studio-tabs/git-pull-request.svg", this.review ? `Merge requests · ${this.review} to review` : "Merge requests", this.review ? { n: this.review, color: t.working } : null))
+      .children(orderedPanels.map(args => panelButton(...args)))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/studio-tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/studio-tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/studio-tabs/win-close.svg").size(16) : svg("mods/studio-pane/close.svg").size(13), () => run("window.close"))));

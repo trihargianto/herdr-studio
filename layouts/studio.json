@@ -149,6 +149,20 @@
                   "active": "tasks",
                   "children": [
                     {
+                      "id": "projects",
+                      "type": "block",
+                      "content": {
+                        "mod": "studio-projects"
+                      }
+                    },
+                    {
+                      "id": "panes",
+                      "type": "block",
+                      "content": {
+                        "mod": "studio-panes"
+                      }
+                    },
+                    {
                       "id": "inbox",
                       "type": "block",
                       "content": {
@@ -195,6 +209,13 @@
                       "type": "block",
                       "content": {
                         "mod": "studio-review"
+                      }
+                    },
+                    {
+                      "id": "automations",
+                      "type": "block",
+                      "content": {
+                        "mod": "studio-automations"
                       }
                     }
                   ]
