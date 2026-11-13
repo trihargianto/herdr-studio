@@ -43,9 +43,10 @@ function shorten(command) {
   return command.split(/\s+/).map((tok) => (tok.startsWith("/") ? tok.split("/").pop() : tok)).join(" ");
 }
 
-// The agents' own helpers listen on ports too (claude, codex, plannotator): they are not your servers.
-const TOOLS = new Set(["claude", "codex", "plannotator", "hc", "herdr-core", "herdr-app"]);
+// Agent helpers stay hidden; Plannotator is explicitly listed as a server.
+const TOOLS = new Set(["claude", "codex", "hc", "herdr-core", "herdr-app"]);
 const firstWord = (command) => command.split(/\s+/)[0].split("/").pop();
+const isPlannotator = (p) => firstWord(p.command) === "plannotator" || p.cmd === "plannotator";
 const isTool = (p) => TOOLS.has(firstWord(p.command)) || TOOLS.has(p.cmd) || /^\d+\.\d+\.\d+$/.test(p.cmd);
 
 // A pane in the side panel does work only while it is the one shown: a hidden pane's timers still run,
@@ -234,7 +235,7 @@ export default class Ports extends View {
     const all = this.list ?? [];
     const base = home();
     // Yours: running from a project folder. The rest is system software.
-    const yours = all.filter((p) => p.cwd.startsWith(`${base}/`) && !p.cwd.startsWith(`${base}/Library`));
+    const yours = all.filter((p) => isPlannotator(p) || (p.cwd.startsWith(`${base}/`) && !p.cwd.startsWith(`${base}/Library`)));
     const mine = yours.filter((p) => !isTool(p));
     const tools = yours.filter(isTool);
     const other = all.filter((p) => !yours.includes(p));

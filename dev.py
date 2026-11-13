@@ -15,15 +15,20 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 def sources():
-    return {str(p.relative_to(ROOT)): p.read_bytes()
+    files = {str(p.relative_to(ROOT)): p.read_bytes()
             for folder in ('layouts', 'mods') for p in (ROOT / folder).rglob('*')
             if p.is_file() and not p.name.startswith('.')
             and p.name != 'jsconfig.json' and not p.name.endswith('.d.ts')}
+    if (ROOT / 'keybindings.json').exists():
+        files['keybindings.json'] = (ROOT / 'keybindings.json').read_bytes()
+    return files
 
 def publish(files):
     previous = json.loads(STATE.read_text()) if STATE.exists() else {}
     # Never replace unrelated files or overwrite edits made directly in Herdr.
     for name in set(previous) | set(files):
+        if name == 'keybindings.json':
+            continue  # Source-only overrides are merged into keys.json below.
         target = HOME / name
         if target.exists():
             actual = digest(target.read_bytes())
@@ -34,13 +39,25 @@ def publish(files):
     for mod in sorted(changed_mods):
         subprocess.run(['herdr-app', 'check', str(ROOT / 'mods' / mod)],
                        check=True, timeout=30)
+    keys_target = HOME / 'keys.json'
+    keys = json.loads(keys_target.read_text()) if keys_target.exists() else {}
+    for section, bindings in json.loads(files.get('keybindings.json', b'{}')).items():
+        keys.setdefault(section, {}).update(bindings)
     for name, data in files.items():
+        if name == 'keybindings.json':
+            continue
         target = HOME / name
         if not target.exists() or target.read_bytes() != data:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
     for name in previous.keys() - files.keys():
+        if name == 'keybindings.json':
+            continue
         (HOME / name).unlink(missing_ok=True)
+    if 'keybindings.json' in files:
+        keys_text = json.dumps(keys, indent=2) + '\n'
+        if not keys_target.exists() or keys_target.read_text() != keys_text:
+            keys_target.write_text(keys_text)
     STATE.write_text(json.dumps({n: digest(d) for n, d in files.items()}, indent=2) + '\n')
     print('Published Studio.', flush=True)
 
