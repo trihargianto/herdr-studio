@@ -1,8 +1,11 @@
 import { View, div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, agents, panes, focused, theme, run, window, keys, home, settings } from "herdr";
+import { spaces, agents, panes, focused, theme, run, window, keys, home, settings, exec } from "herdr";
 
 const ICONS = "mods/studio-workspace-chrome";
+// The same pair as Monitoring: sky blue and orange stay apart for every common colour blindness.
+const CPU_COLOR = "#56B4E9", MEM_COLOR = "#E69F00";
+const gb = (kb) => (kb >= 1048576 ? `${(kb / 1048576).toFixed(1)} GB` : `${Math.round(kb / 1024)} MB`);
 
 function folder(cwd) {
   if (!cwd) return "";
@@ -11,9 +14,63 @@ function folder(cwd) {
 }
 
 export default class WorkspaceStatus extends View {
-  init() {
+  init(_props, cx) {
     // The address just copied, shown as "Copied" for a moment.
     this.copied = null;
+    // The whole Mac's load, as Monitoring counts it, read every 5 seconds while the window is in front.
+    this.load = null; // { cpu: 0..1, memKb, ramKb }
+    this.sys = null;
+    this.reading = false;
+    this.readLoad(cx);
+    cx.timer.every(5000, (cx) => { if (window()?.active !== false) this.readLoad(cx); });
+  }
+
+  readLoad(cx) {
+    if (this.reading) return;
+    this.reading = true;
+    cx.spawn(async (cx) => {
+      try {
+        if (!this.sys) {
+          const r = await exec("sysctl", ["-n", "hw.ncpu", "hw.memsize"], { cwd: home(), timeout: 5000 });
+          const [cores, bytes] = r.stdout.trim().split(/\s+/).map(Number);
+          if (cores && bytes) this.sys = { cores, ramKb: bytes / 1024 };
+        }
+        const [ps, vm] = await Promise.all([
+          exec("ps", ["-axo", "pcpu="], { cwd: home(), timeout: 5000 }),
+          exec("vm_stat", [], { cwd: home(), timeout: 5000 }),
+        ]);
+        const cpu = ps.stdout.split("\n").reduce((a, l) => a + (Number(l) || 0), 0);
+        const page = Number(vm.stdout.match(/page size of (\d+)/)?.[1]);
+        const pages = (k) => Number(vm.stdout.match(new RegExp(`${k}:\\s+(\\d+)`))?.[1]) || 0;
+        const used = pages("Anonymous pages") + pages("Pages wired down") + pages("Pages occupied by compressor");
+        if (this.sys && page) this.load = { cpu: Math.min(1, cpu / (this.sys.cores * 100)), memKb: (used * page) / 1024, ramKb: this.sys.ramKb };
+      } catch {}
+      this.reading = false;
+      cx.notify();
+    });
+  }
+
+  // CPU and memory for the whole Mac. Past 85% (memory) or 80% (CPU) it warns, with a mark as well as a
+  // colour; a click opens Monitoring.
+  loadChip(t) {
+    const l = this.load;
+    const mem = l.memKb / l.ramKb;
+    const hot = mem >= 0.93 || l.cpu >= 0.95 ? "critical" : mem >= 0.85 || l.cpu >= 0.8 ? "warn" : null;
+    const tone = hot === "critical" ? t.blocked : hot === "warn" ? t.ansi3 : null;
+    const mono = settings().font_family ?? "JetBrains Mono";
+    const part = (color, label, value) => h_flex().gap(4).items_center()
+      .child(div().size(6).rounded(2).bg(color))
+      .child(div().text_color(t.dim).child(label))
+      .child(div().font_family(mono).text_color(tone ?? t.muted).child(value));
+    return h_flex().id("status-load").flex_none().h(20).px(7).gap(10).items_center().rounded(5).cursor_pointer()
+      .when(Boolean(tone), (el) => el.bg(tone + "1a"))
+      .tooltip(`Whole Mac: CPU ${Math.round(l.cpu * 100)}% of ${this.sys.cores} cores, memory ${gb(l.memKb)} of ${gb(l.ramKb)}. Click for Monitoring`)
+      .accessibility_label(`CPU ${Math.round(l.cpu * 100)} percent, memory ${gb(l.memKb)} used${hot ? ", high" : ""}. Open Monitoring`)
+      .hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected))
+      .on_click(() => { run("layout.select", { stack: "panel-body", child: "usage" }); run("layout.show", { id: "panel" }); })
+      .when(Boolean(hot), (el) => el.child(div().text_color(tone).font_semibold().child("▲")))
+      .child(part(CPU_COLOR, "CPU", `${Math.round(l.cpu * 100)}%`))
+      .child(part(MEM_COLOR, "MEM", `${gb(l.memKb)} · ${Math.round(mem * 100)}%`));
   }
 
   // The palette key as actually bound, not a hardcoded one; without a
@@ -70,6 +127,7 @@ export default class WorkspaceStatus extends View {
         .hover((s) => s.bg(t.blocked + "2a")).active((s) => s.bg(t.blocked + "33"))
         .on_click(() => run("agent.focus", { terminal: blocked[0].address }))
         .child(`${blocked.length} ${blocked.length === 1 ? "needs" : "need"} you`)))
+      .when(Boolean(this.load), (el) => el.child(this.loadChip(t)))
       .child(div().id("palette").flex_none().text_color(t.dim).cursor_pointer().on_click(() => run("app.palette")).child(this.hint(t)));
   }
 }

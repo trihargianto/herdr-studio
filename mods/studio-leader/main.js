@@ -10,7 +10,8 @@ import { run, hc, focused, appHome, theme, settings, closeOverlay, props, nextCo
 
 const go = (direction) => [["pane.go", { direction }]];
 const swap = (direction) => [["pane.swap", { direction }]];
-const panel = (child) => [["layout.select", { stack: "panel-body", child }], ["layout.show", { id: "panel" }]];
+// Shows a panel; a panel that takes the keyboard (Projects, Panes) gets it too, ready for j/k.
+const panel = (child, mod) => [["layout.select", { stack: "panel-body", child }], ["layout.show", { id: "panel" }], ...(mod ? [[`${mod}.focus`]] : [])];
 const nth = (cmd) => Array.from({ length: 9 }, (_, i) => ({ key: String(i + 1), label: `Go to ${i + 1}`, run: [[cmd, { index: i + 1 }]] }));
 
 // The leader tree. A group has `items`; anything else has `run`, a list of [command, args].
@@ -51,10 +52,10 @@ const TREE = [
   ] },
   { key: "p", label: "Panels", items: [
     { key: "m", label: "Monitoring", run: panel("usage") },
-    { key: "p", label: "Projects", run: panel("projects") },
+    { key: "p", label: "Projects", run: panel("projects", "studio-projects") },
     { key: "t", label: "Tasks", run: panel("tasks") },
     { key: "i", label: "Inbox", run: panel("inbox") },
-    { key: "a", label: "Panes", run: panel("panes") },
+    { key: "a", label: "Panes", run: panel("panes", "studio-panes") },
     { key: "s", label: "Send", run: panel("send") },
     { key: "g", label: "Merge requests", run: panel("mrs") },
     { key: "o", label: "Ports", run: panel("ports") },

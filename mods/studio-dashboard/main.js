@@ -255,14 +255,16 @@ export default class Dashboard extends View {
       .child(svg(`${ICONS}/chevron-${open ? "down" : "right"}.svg`).size(11).flex_none().text_color(t.dim));
   }
 
+  // A filter: the status in words and how many, so it reads without telling colours apart.
+  // Selected: tinted, with a border and the status colour; a count of 0 is dimmed and can't be picked.
   chip(t, status, count) {
     const on = this.filter === status;
     const empty = count === 0 && !on;
     const color = t[status] ?? t.dim;
-    return h_flex().id(`chip-${status}`).flex_1().min_w(0).h(26).gap(5).items_center().justify_center().rounded(6)
+    return h_flex().id(`chip-${status}`).flex_none().h(24).px(8).gap(6).items_center().rounded(6)
       .border(1).border_color(on ? color + "80" : t.border).bg(on ? color + "1f" : t.chrome)
-      .text_size(12).font_medium().text_color(empty ? t.dim : on ? color : t.foreground)
-      .tooltip(`${LABELS[status]} · ${count}${on ? " (click to clear)" : ""}`)
+      .text_size(11.5).font_medium()
+      .tooltip(`${LABELS[status]} · ${count}${on ? " (click to show all)" : empty ? "" : " (click to show only these)"}`)
       .accessibility_label(`${LABELS[status]}, ${count}. ${on ? "Clear filter" : "Show only these"}`)
       .when(!empty, (el) => el.cursor_pointer()
         .hover((s) => s.bg(on ? color + "2a" : t.hover))
@@ -271,8 +273,8 @@ export default class Dashboard extends View {
           this.filter = on ? null : status;
           cx.notify();
         }))
-      .child(div().when(empty, (el) => el.opacity(0.45)).child(this.mark(t, status, 11)))
-      .child(div().child(String(count)));
+      .child(div().text_color(empty ? t.dim : on ? color : t.muted).child(LABELS[status]))
+      .child(div().font_semibold().text_color(empty ? t.dim : on ? color : t.foreground).child(String(count)));
   }
 
   segment(t, id, label, on, action) {
@@ -386,7 +388,7 @@ export default class Dashboard extends View {
           .child(h_flex().flex_none().p(2).gap(2).rounded(6).border(1).border_color(t.border)
             .child(this.segment(t, "scope-space", "Space", !all, () => this.setScope("space")))
             .child(this.segment(t, "scope-all", "All", all, () => this.setScope("all")))))
-        .child(h_flex().gap(4).children(ORDER.map((s) => this.chip(t, s, counts[s]))))
+        .child(h_flex().flex_wrap().gap(4).children(ORDER.map((s) => this.chip(t, s, counts[s]))))
         .when(elsewhere > 0, (el) => el.child(h_flex().id("elsewhere").h(26).px(8).gap(6).items_center().rounded(6)
           .bg(t.blocked + "1a").text_size(11.5).font_medium().text_color(t.blocked).cursor_pointer()
           .accessibility_label(`${elsewhere} need you in other spaces. Show them`)

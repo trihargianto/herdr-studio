@@ -324,6 +324,26 @@ export default class Tabs extends View {
     const saved = [...new Set(this.panelOrder)].filter(id => panels.some(p => p[0] === id));
     const order = [...saved, ...panels.map(p => p[0]).filter(id => !saved.includes(id))];
     const orderedPanels = order.map(id => panels.find(p => p[0] === id));
+    // Five panels keep a button; the rest sit behind the Panels menu (and Ctrl+B p on the keyboard).
+    const PRIMARY = new Set(["tasks", "inbox", "mrs", "usage", "ports"]);
+    const NAMES = { projects: "Projects", automations: "Automations", panes: "Panes", review: "Review", usage: "Monitoring", ports: "Ports", tasks: "Tasks", inbox: "Inbox", send: "Send", mrs: "Merge requests" };
+    const buttonPanels = orderedPanels.filter(p => PRIMARY.has(p[0]));
+    const menuPanels = orderedPanels.filter(p => !PRIMARY.has(p[0]));
+    const openHidden = panel && !panel.hidden ? menuPanels.find(p => p[0] === body?.active) : null;
+    const menuBadge = !openHidden && menuPanels.some(p => p[4]);
+    const panelsMenu = h_flex().id("panels-menu").h(26).px(words ? 8 : 7).gap(5).flex_none().items_center().rounded(6).text_size(12)
+      .bg(openHidden ? t.selected : t.chrome).text_color(openHidden ? t.foreground : t.muted)
+      .cursor_pointer().tooltip(openHidden ? `${NAMES[openHidden[0]]} · more panels` : "More panels").accessibility_label("More panels")
+      .hover(s => s.bg(openHidden ? t.selected : t.hover).text_color(t.foreground)).active(s => s.bg(t.selected))
+      .on_mouse_down("left", stop)
+      .on_click(() => openOverlay({
+        mod: "studio-panel-menu", kind: "popup", width: 230, height: menuPanels.length * 31 + 48, at: "pointer",
+        props: { items: menuPanels.map(([id, _label, icon, tip, badge]) => ({ id, label: NAMES[id] ?? id, icon, tip, badge: badge ?? null })), active: openHidden?.[0] ?? null },
+      }))
+      .child(svg(openHidden ? openHidden[2] : "mods/studio-tabs/panels.svg").size(14))
+      .when(words, el => el.child(openHidden ? NAMES[openHidden[0]] : "Panels"))
+      .child(div().text_size(9).text_color(t.dim).child("▾"))
+      .when(menuBadge, el => el.child(div().size(6).rounded(3).bg(t.ansi2)));
     return h_flex().id("tab-bar").size_full().min_w(0).px(10).pl(lightsPadding)
       .on_size_change((size, cx) => {
         if (this.barWidth !== size.width) {
@@ -346,7 +366,8 @@ export default class Tabs extends View {
         .on_click((_e, cx) => this.openNeovim(cx))
         .child(svg("mods/studio-workspace-chrome/terminal.svg").size(14))
         .when(words, el => el.child("Neovim")))
-      .children(orderedPanels.map(args => panelButton(...args)))
+      .children(buttonPanels.map(args => panelButton(...args)))
+      .child(panelsMenu)
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/studio-tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/studio-tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/studio-tabs/win-close.svg").size(16) : svg("mods/studio-pane/close.svg").size(13), () => run("window.close"))));
